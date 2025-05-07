@@ -1,286 +1,251 @@
-import pygame
-import random
-from pacman import PacMan            # Клас гравця (Пакмен)
-from ghost import Ghost              # Клас привидів
-from menu import MainMenu            # Головне меню
-from menu import SubMenu             # Підменю (наприклад, пауза)
-from settings import Settings        # Клас для збереження налаштувань
-from wall import Wall                # Клас для відображення стін
-from coin import Coin                # Клас монет
+import os
+import sys
+import pygame as pg
+import itertools
+
+from constants       import *
+from settings        import load_settings, save_settings
+from game_state      import GameState
+from level_loader    import load_level
+from entities.pacman import PacMan
+from entities.ghost  import Ghost
+from menu            import Menu
 
 class Game:
     def __init__(self):
-        pygame.init()                                      # Ініціалізація Pygame
-        pygame.display.set_caption("Pac-Man")              # Назва вікна гри
-        self.clock = pygame.time.Clock()                   # Годинник для контролю FPS
+        pg.init()
+        #Налаштування вікна та завантаження логотипу
+        self.settings = load_settings()
+        w, h = self.settings["resolution"]
+        self.screen = pg.display.set_mode((w, h))
+        pg.display.set_caption("Pac-Man")
 
-        self.settings = Settings()                         # Ініціалізація налаштувань гри
-        self.screen = pygame.display.set_mode(self.settings.resolution)  # Розмір вікна
-        self.scale_x = self.settings.resolution[0] / 640   # Масштаб по осі X
-        self.scale_y = self.settings.resolution[1] / 480   # Масштаб по осі Y
+        logo_path = os.path.join("data", "pacman_logo.png")
+        if not os.path.isfile(logo_path):
+            print(f"Логотип не знайдено: {logo_path}")
+            sys.exit()
+        self.logo = pg.image.load(logo_path).convert_alpha()
+        logo_w = int(w * 0.6)
+        logo_h = int(self.logo.get_height() * (logo_w / self.logo.get_width()))
+        self.logo = pg.transform.scale(self.logo, (logo_w, logo_h))
 
-        self.menu = MainMenu(self.screen, self.settings, self.change_menu)  # Головне меню
-        self.current_menu = self.menu                     # Поточне активне меню
+        #Меню
+        self.menu = Menu(self.screen)
+        self.menu.options = ["Start Game", "Difficulty", "Resolution", "Exit"]
+        self.diff_menu = Menu(self.screen)
+        self.diff_menu.options = ["Normal", "Hard", "Back"]
+        self.res_menu = Menu(self.screen)
+        self.res_menu.options = ["800x600", "1280x720", "1600x900", "Back"]
+        self.game_over_menu = Menu(self.screen)
+        self.game_over_menu.options = ["Retry", "Main Menu"]
+        self.victory_menu = Menu(self.screen)
+        self.victory_menu.options = ["Retry", "Main Menu"]
 
-        self.pacman = PacMan(scale_x=self.scale_x, scale_y=self.scale_y)  # Створення гравця
-        self.ghosts = []                                  # Список привидів
-        self.walls = []                                   # Список стін
-        self.coins = []                                   # Список монет
-        self.running = True                               # Чи працює гра
-        self.in_menu = True                               # Чи активне меню
-        self.paused = False                               # Чи гра на паузі
-        self.game_over = False                            # Чи гра закінчилась
-        self.score = 0                                    # Поточний рахунок
+        #Загальні
+        self.clock = pg.time.Clock()
+        self.font  = pg.font.Font(None, 28)
+        self.state = GameState.MENU
 
-        self.pause_menu = SubMenu(                        # Меню паузи
-            self.screen,
-            "Game Paused",
-            ["Resume", "Main Menu"],
-            self.handle_pause_selection
-        )
+        #Ігрові змінні
+        self.level_idx = 1
+        self.score     = 0
+        self.lives     = 3
 
-    def spawn_ghosts(self):
-        # Створення привидів залежно від складності
-        count = 2 if self.settings.difficulty == 1 else 3
-        base_speed = 1.5
-        speed = base_speed if self.settings.difficulty == 1 else base_speed * 1.2
-        self.ghosts = [Ghost(random.randint(100, 500) * self.scale_x,
-                             random.randint(100, 400) * self.scale_y,
-                             speed) for _ in range(count)]
+        #Підготовка рівня
+        self._load_level()
+        level_path = f"levels/level{self.level_idx}.txt"
+        with open(level_path, encoding="utf-8") as f:
+            lines = [ln.rstrip("\n") for ln in f if ln.strip()]
+        self.map_cols = len(lines[0])
+        self.map_rows = len(lines)
+        self.map_surface = pg.Surface((self.map_cols * TILE,
+                                       self.map_rows * TILE))
 
-    def create_maze(self):
-        # Побудова лабіринту (стіни)
-        self.walls.clear()
-        wall_thickness = 10
+    def _load_level(self):
+        path = f"levels/level{self.level_idx}.txt"
+        walls, coins, power, portals, ppos, gpos = load_level(path)
+        self.walls, self.coins, self.power, self.portals = walls, coins, power, portals
 
-        # Зовнішні межі
-        borders = [
-            (0, 0, 640, wall_thickness),
-            (0, 0, wall_thickness, 480),
-            (620, 0, wall_thickness, 480),
-            (0, 460, 640, wall_thickness)
-        ]
-        for rect in borders:
-            x, y, w, h = rect
-            self.walls.append(Wall((x * self.scale_x, y * self.scale_y, w * self.scale_x, h * self.scale_y)))
+        maxg = 4 if self.settings.get("difficulty", "normal") == "hard" else 2
+        selected_gpos = gpos[:maxg]
 
-        # Внутрішні стіни
-        pattern = [
-            # координати та розміри стін у пікселях (до масштабування)
-            (60, 60, 520, 20), (60, 60, 20, 360), (60, 420, 520, 20), (560, 60, 20, 380),
-            (100, 100, 100, 20), (200, 100, 20, 100), (240, 100, 20, 80),
-            (280, 100, 100, 20), (380, 100, 20, 100), (420, 100, 100, 20),
-            (100, 200, 100, 20), (200, 200, 20, 100), (240, 240, 100, 20),
-            (340, 200, 20, 100), (380, 200, 120, 20),
-            (100, 300, 140, 20), (280, 300, 20, 100), (320, 360, 140, 20),
-            (480, 260, 20, 100)
-        ]
-        for rect in pattern:
-            x, y, w, h = rect
-            self.walls.append(Wall((x * self.scale_x, y * self.scale_y, w * self.scale_x, h * self.scale_y)))
-
-    def spawn_coins(self):
-        # Створення монет у прохідних місцях
-        self.coins.clear()
-        for x in range(40, 600, 40):
-            for y in range(40, 440, 40):
-                scaled_x = x * self.scale_x
-                scaled_y = y * self.scale_y
-                coin_rect = pygame.Rect(scaled_x - 5, scaled_y - 5, 10, 10)
-                if not any(w.rect.colliderect(coin_rect) for w in self.walls):
-                    temp_coin = Coin(scaled_x, scaled_y)
-                    if self.is_coin_reachable(temp_coin):
-                        self.coins.append(temp_coin)
+        speed = 150 if self.settings["difficulty"] == "normal" else 180
+        self.player = PacMan(ppos, speed)
+        self.ghosts = [Ghost(pos, i, 120, self.walls)
+                       for i, pos in enumerate(selected_gpos)]
 
     def run(self):
-        # Головний цикл гри
-        while self.running:
-            if self.in_menu:
-                self.handle_menu_events()
-                self.current_menu.display_menu()
-            elif self.game_over:
-                self.handle_game_over_events()
-                self.display_game_over()
-            elif self.paused:
-                self.handle_pause_events()
-                self.pause_menu.display_menu()
+        running = True
+        while running:
+            dt = self.clock.tick(FPS) / 1000.0
+
+            for e in pg.event.get():
+                if e.type == pg.QUIT:
+                    running = False
+
+                # — Обробка меню
+                if self.state == GameState.MENU:
+                    choice = self.menu.handle_event(e)
+                    if choice == "Start Game":
+                        self.score = 0; self.lives = 3; self.level_idx = 1
+                        self._load_level()
+                        self.state = GameState.PLAY
+                    elif choice == "Difficulty":
+                        self.state = GameState.DIFFICULTY
+                    elif choice == "Resolution":
+                        self.state = GameState.RESOLUTION
+                    elif choice == "Exit":
+                        running = False
+
+                elif self.state == GameState.DIFFICULTY:
+                    choice = self.diff_menu.handle_event(e)
+                    if choice in ("Normal", "Hard"):
+                        self.settings["difficulty"] = choice.lower()
+                        save_settings(self.settings)
+                        self.state = GameState.MENU
+                    elif choice == "Back":
+                        self.state = GameState.MENU
+
+                elif self.state == GameState.RESOLUTION:
+                    choice = self.res_menu.handle_event(e)
+                    if choice and choice.endswith(("x600","x720","x900")):
+                        w, h = map(int, choice.split("x"))
+                        self.settings["resolution"] = [w, h]
+                        save_settings(self.settings)
+                        self.screen = pg.display.set_mode((w, h))
+                        for m in (self.menu, self.diff_menu, self.res_menu, self.game_over_menu, self.victory_menu):
+                            m.screen = self.screen
+                        self.state = GameState.MENU
+                    elif choice == "Back":
+                        self.state = GameState.MENU
+
+                elif self.state == GameState.GAME_OVER_MENU:
+                    choice = self.game_over_menu.handle_event(e)
+                    if choice == "Retry":
+                        self.score = 0; self.lives = 3
+                        self._load_level()
+                        self.state = GameState.PLAY
+                    elif choice == "Main Menu":
+                        self.state = GameState.MENU
+
+                elif self.state == GameState.VICTORY_MENU:
+                    choice = self.victory_menu.handle_event(e)
+                    if choice == "Retry":
+                        self.score = 0; self.lives = 3
+                        self._load_level()
+                        self.state = GameState.PLAY
+                    elif choice == "Main Menu":
+                        self.state = GameState.MENU
+
+                elif e.type == pg.KEYDOWN and e.key == pg.K_ESCAPE:
+                    if self.state == GameState.PLAY:
+                        self.state = GameState.PAUSE
+                    elif self.state == GameState.PAUSE:
+                        self.state = GameState.PLAY
+
+            if self.state == GameState.PLAY:
+                self.update(dt)
+
+            # Рендеринг
+            self.screen.fill(BLACK)
+
+            if self.state == GameState.MENU:
+                self.screen.fill(YELLOW)
+                x = (self.screen.get_width() - self.logo.get_width()) // 2
+                self.screen.blit(self.logo, (x, 40))
+                self.menu.draw()
+
+            elif self.state == GameState.DIFFICULTY:
+                self.screen.fill(YELLOW)
+                x = (self.screen.get_width() - self.logo.get_width()) // 2
+                self.screen.blit(self.logo, (x, 40))
+                self.diff_menu.draw()
+
+            elif self.state == GameState.RESOLUTION:
+                self.screen.fill(YELLOW)
+                x = (self.screen.get_width() - self.logo.get_width()) // 2
+                self.screen.blit(self.logo, (x, 40))
+                self.res_menu.draw()
+
             else:
-                self.handle_game_events()
-                self.update_game()
                 self.draw_game()
+                if self.state == GameState.PAUSE:
+                    txt = self.font.render("Paused", True, WHITE)
+                    self.screen.blit(txt, txt.get_rect(center=self.screen.get_rect().center))
+                elif self.state == GameState.GAME_OVER_MENU:
+                    txt = self.font.render("Game Over", True, RED)
+                    self.screen.blit(txt, txt.get_rect(center=(self.screen.get_width()//2,50)))
+                    self.game_over_menu.draw()
+                elif self.state == GameState.VICTORY_MENU:
+                    txt = self.font.render("You Win!", True, WHITE)
+                    self.screen.blit(txt, txt.get_rect(center=(self.screen.get_width()//2,50)))
+                    self.victory_menu.draw()
 
-            pygame.display.flip()      # Оновлення екрану
-            self.clock.tick(60)        # Затримка для 60 FPS
+            pg.display.flip()
 
-    def handle_menu_events(self):
-        # Обробка подій в меню
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                self.running = False
-            elif event.type == pygame.KEYDOWN:
-                if isinstance(self.current_menu, SubMenu):
-                    if event.key == pygame.K_UP:
-                        self.current_menu.navigate(-1)
-                    elif event.key == pygame.K_DOWN:
-                        self.current_menu.navigate(1)
-                    elif event.key == pygame.K_RETURN:
-                        self.current_menu.select_option()
-                    elif event.key == pygame.K_ESCAPE:
-                        self.current_menu.callback = None
-                        self.current_menu = self.menu
-                elif isinstance(self.current_menu, MainMenu):
-                    if event.key == pygame.K_UP:
-                        self.menu.navigate(-1)
-                    elif event.key == pygame.K_DOWN:
-                        self.menu.navigate(1)
-                    elif event.key == pygame.K_RETURN:
-                        result = self.menu.select_option()
-                        if result == "start":
-                            self.start_new_game()
-                        elif result == "exit":
-                            self.running = False
+        pg.quit()
 
-    def handle_game_events(self):
-        # Обробка подій під час гри
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                self.running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    self.paused = True
+    def update(self, dt):
+        # Рух пакмена та warp
+        self.player.update(dt, self.walls + self.portals)
+        max_x = self.map_cols * TILE
+        if self.player.rect.right < 0:
+            self.player.rect.left = max_x
+        elif self.player.rect.left > max_x:
+            self.player.rect.right = 0
+
+        # Збір монет і PowerPellets
+        for c in list(self.coins):
+            if self.player.rect.collidepoint(c.pos):
+                self.coins.remove(c)
+                self.score += 10
+        for p in list(self.power):
+            if self.player.rect.collidepoint(p.pos):
+                self.power.remove(p)
+                for g in self.ghosts:
+                    g.set_frightened(8.0)
+
+        # Рух привидів + варп + колізії
+        for g in self.ghosts:
+            g.update(dt, self.walls, self.player)
+            if g.rect.right < 0:
+                g.rect.left = max_x
+            elif g.rect.left > max_x:
+                g.rect.right = 0
+            if g.rect.colliderect(self.player.rect):
+                if g.frightened_timer > 0:
+                    self.score += 200
+                    g.respawn()
                 else:
-                    self.pacman.handle_event(event)
+                    self.lives -= 1
+                    if self.lives > 0:
+                        self.player.respawn()
+                        for gh in self.ghosts:
+                            gh.respawn()
+                    else:
+                        self.state = GameState.GAME_OVER_MENU
+                break
 
-    def handle_pause_events(self):
-        # Обробка подій у меню паузи
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                self.running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_UP:
-                    self.pause_menu.navigate(-1)
-                elif event.key == pygame.K_DOWN:
-                    self.pause_menu.navigate(1)
-                elif event.key == pygame.K_RETURN:
-                    self.pause_menu.select_option()
-
-    def handle_pause_selection(self, option):
-        # Обробка вибору пункту в меню паузи
-        if option == "Resume":
-            self.paused = False
-        elif option == "Main Menu":
-            self.in_menu = True
-            self.paused = False
-            self.current_menu = self.menu
-
-    def handle_game_over_events(self):
-        # Обробка подій після завершення гри
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                self.running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_RETURN:
-                    self.in_menu = True
-                    self.game_over = False
-                    self.score = 0
-                    self.pacman = PacMan(scale_x=self.scale_x, scale_y=self.scale_y)
-
-    def start_new_game(self):
-        # Ініціалізація нової гри
-        self.scale_x = self.settings.resolution[0] / 640
-        self.scale_y = self.settings.resolution[1] / 480
-        self.spawn_ghosts()
-        self.create_maze()
-        self.spawn_coins()
-        self.in_menu = False
-        self.game_over = False
-        self.paused = False
-        self.score = 0
-        self.pacman = PacMan(scale_x=self.scale_x, scale_y=self.scale_y)
-
-    def update_game(self):
-        # Оновлення стану гри
-        self.pacman.update(self.walls)
-        for ghost in self.ghosts:
-            ghost.update(self.pacman, self.walls)
-
-        if all(coin.collected for coin in self.coins):
-            self.game_over = True
-            self.display_win_screen()
-
-        for coin in self.coins:
-            if not coin.collected and self.pacman.position.distance_to(coin.position) < 20:
-                coin.collected = True
-                self.score += 1
-
-        for ghost in self.ghosts:
-            if self.pacman.position.distance_to(ghost.position) < 20:
-                self.game_over = True
+        # Win
+        if not self.coins and not self.power:
+            self.state = GameState.VICTORY_MENU
 
     def draw_game(self):
-        # Вивід всіх об'єктів гри на екран
-        self.screen.fill(self.settings.bg_color)
-        for wall in self.walls:
-            wall.draw(self.screen)
-        for coin in self.coins:
-            coin.draw(self.screen)
-        self.pacman.draw(self.screen)
-        for ghost in self.ghosts:
-            ghost.draw(self.screen, (255, 0, 0))
+        self.map_surface.fill(BLACK)
+        for w in self.walls:
+            self.map_surface.blit(w.image, w.rect)
+        for obj in itertools.chain(self.coins, self.power):
+            obj.draw(self.map_surface)
+        self.player.draw(self.map_surface)
+        for g in self.ghosts:
+            g.draw(self.map_surface)
 
-        font = pygame.font.SysFont(None, 36)
-        score_text = font.render(f"Coins: {self.score}", True, (255, 255, 255))
-        self.screen.blit(score_text, (10, 10))
+        win_w, win_h = self.screen.get_size()
+        scaled = pg.transform.scale(self.map_surface, (win_w, win_h - 40))
+        self.screen.blit(scaled, (0, 0))
 
-    def display_pause(self):
-        # Вивід тексту "Пауза"
-        font = pygame.font.SysFont(None, 72)
-        pause_text = font.render("Paused", True, (255, 255, 255))
-        self.screen.blit(pause_text, (220, 200))
-
-    def display_game_over(self):
-        # Вивід екрану поразки
-        self.screen.fill((0, 0, 0))
-        font = pygame.font.SysFont(None, 72)
-        text = font.render("Game Over", True, (255, 0, 0))
-        self.screen.blit(text, (180, 180))
-
-        small_font = pygame.font.SysFont(None, 48)
-        menu_text = small_font.render("Press ENTER to return to Menu", True, (255, 255, 255))
-        self.screen.blit(menu_text, (100, 300))
-
-    def display_win_screen(self):
-        # Вивід екрану перемоги
-        self.screen.fill((0, 100, 0))
-        font = pygame.font.SysFont(None, 72)
-        text = font.render("You Won!", True, (255, 255, 0))
-        self.screen.blit(text, (200, 180))
-        pygame.display.flip()
-        pygame.time.delay(2000)
-        self.in_menu = True
-        self.game_over = False
-
-    def change_menu(self, new_menu):
-        # Зміна активного меню
-        self.current_menu = new_menu
-
-    def is_coin_reachable(self, coin):
-        # Перевірка, чи монету можна досягти з поточної позиції Пакмена (BFS)
-        visited = set()
-        queue = [self.pacman.position]
-
-        def point_in_wall(pos):
-            return any(w.rect.collidepoint(pos.x, pos.y) for w in self.walls)
-
-        while queue:
-            current = queue.pop(0)
-            if current.distance_to(coin.position) < 15:
-                return True
-
-            for dx, dy in [(-20, 0), (20, 0), (0, -20), (0, 20)]:
-                neighbor = pygame.Vector2(current.x + dx, current.y + dy)
-                if (neighbor.x, neighbor.y) not in visited and not point_in_wall(neighbor):
-                    visited.add((neighbor.x, neighbor.y))
-                    queue.append(neighbor)
-
-        return False
+        # нижній худ
+        score_txt = self.font.render(f"Score: {self.score}", True, WHITE)
+        lives_txt = self.font.render(f"Lives: {self.lives}", True, WHITE)
+        self.screen.blit(score_txt, (10, win_h - 30))
+        self.screen.blit(lives_txt, (win_w - lives_txt.get_width() - 10, win_h - 30))
