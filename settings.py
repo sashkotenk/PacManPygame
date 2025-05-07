@@ -1,21 +1,22 @@
-class Settings:
-    def __init__(self):
-        # Встановлення початкової роздільної здатності (ширина, висота)
-        self.resolution = (640, 480)
-        # Встановлення початкового кольору фону (чорний: RGB (0, 0, 0))
-        self.bg_color = (0, 0, 0)
-        # Встановлення початкового рівня складності (1 - легкий)
-        self.difficulty = 1
+import json
+from pathlib import Path
 
-    def set_resolution(self, resolution):
-        # Зміна роздільної здатності на вказане значення
-        self.resolution = resolution
-        return resolution  
+# За замовчуванням — 1280×720
+_DEFAULT = {
+    "resolution": [1280, 720],
+    "difficulty": "normal",   # normal / hard
+    "sound": True,
+    "high_score": 0
+}
+_FILE = Path("settings.json")
 
-    def adjust_difficulty(self, level):
-        # Зміна рівня складності на вказаний рівень
-        self.difficulty = level
+def load_settings():
+    if _FILE.exists():
+        with open(_FILE, "r", encoding="utf-8") as f:
+            _DEFAULT.update(json.load(f))
+    # повертаємо копію, щоб оригінал не змінювався випадково
+    return _DEFAULT.copy()
 
-    def change_bg_color(self, color):
-        # Зміна кольору фону на вказаний колір (у форматі RGB)
-        self.bg_color = color
+def save_settings(data):
+    with open(_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
